@@ -3,7 +3,8 @@ import datetime
 import decimal
 import pathlib
 import os
-import argparse
+import glob
+import logging
 
 from actual import Actual
 from actual.exceptions import UnknownFileId, ActualError
@@ -15,7 +16,9 @@ ACTUAL_BUDGET_PASSWORD = os.environ.get("ACTUAL_BUDGET_PASSWORD")
 CSV_FILE_PATH = os.environ.get("CSV_FILE_PATH")
 BUDGET_NAME = os.environ.get("BUDGET_NAME") or "CSV Import"
 ACCOUNT_NAME_DEFAULT = os.environ.get("ACCOUNT_NAME_DEFAULT")
-base_url="https://budget.local.boxxynet.com"
+
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Helper Functions ---
 
@@ -23,15 +26,14 @@ def load_csv_data(file: pathlib.Path) -> list[dict]:
     data = []
     with open(file, encoding='utf-8') as csvfile:
         reader = csv.reader(csvfile)
+        next(reader)  # Skip header row if present
         for row in reader:
             try:
-                # *** KEY CHANGE: Map columns by index (ADJUST THESE TO YOUR CSV) ***
-                #column 0 is the first column in the file
                 date_str = row[1]
                 amount_str = row[7]
                 payee = row[4]
-                category = row[6]
-                notes = row[11] if len(row) > 4 else ""
+                category = ""  # row[6]
+                notes = row[11] if len(row) > 11 else ""
 
                 amount = decimal.Decimal(amount_str)
                 date = datetime.datetime.strptime(date_str, "%d-%m-%Y").date()  # DD-MM-YYYY format
@@ -47,27 +49,63 @@ def load_csv_data(file: pathlib.Path) -> list[dict]:
                 })
 
             except (ValueError, IndexError) as e:
-                print(f"Error processing row: {row}. Skipping. Error: {e}")
+                logging.error(f"Error processing row: {row} from file {file.name}. Skipping. Error: {e}")
                 continue
 
     return data
 
+def process_csv_file(file_path: pathlib.Path, actual: Actual):
+    try:
+        added_transactions = []
+        row_number = 1
+        for row in load_csv_data(file_path):
+            logging.info(f"Processing row {row_number} from {file_path.name}: {row}")
+
+            account_name, payee, notes, category, cleared, date, amount = (
+                row["Account"],
+                row["Payee"],
+                row["Notes"],
+                row["Category"],
+                row["Cleared"],
+                row["Date"],
+                row["Amount"],
+            )
+
+            account = get_or_create_account(actual.session, account_name)
+            try:
+                t = reconcile_transaction(
+                    actual.session,
+                    date,
+                    account,
+                    payee,
+                    notes,
+                    category,
+                    amount,
+                    cleared=cleared,
+                    already_matched=added_transactions,
+                )
+                added_transactions.append(t)
+                if t.changed():
+                    logging.info(f"Added or modified {t} from file {file_path.name}")
+            except ActualError as e:
+                logging.error(f"Error reconciling transaction (row {row_number}): {row} from file {file_path.name}. Error: {e}")
+                continue
+
+            row_number += 1
+
+        actual.commit()
+        logging.info(f"Transactions from {file_path.name} imported successfully!")
+    except Exception as e:
+        logging.exception(f"A general error occurred while processing {file_path.name}: {e}")
+
 
 def main():
-    file = pathlib.Path(CSV_FILE_PATH)
-
     if not ACTUAL_BUDGET_PASSWORD:
         raise ValueError("ACTUAL_BUDGET_PASSWORD environment variable must be set.")
     if not CSV_FILE_PATH:
         raise ValueError("CSV_FILE_PATH environment variable must be set.")
     if not ACCOUNT_NAME_DEFAULT:
         raise ValueError("ACCOUNT_NAME_DEFAULT environment variable must be set.")
-
-    # *** URL Configuration using actual.ini ***
-    # 1. Create actual.ini in your home directory (or .actualrc)
-    # 2. Add the following lines, replacing with your URL:
-    #    [actual]
-    #    url = https://your_actual_budget_url  <- Replace with your URL
 
     try:
         with Actual(
@@ -78,46 +116,21 @@ def main():
                 actual.set_file(BUDGET_NAME)
                 actual.download_budget()
             except UnknownFileId:
-                actual.create_budget(BUDGET_NAME)
-                actual.upload_budget()
+                logging.error(f"Budget '{BUDGET_NAME}' not found. Please create it manually in Actual.")
+                return
 
-            added_transactions = []
-            for row in load_csv_data(file):
-                account_name, payee, notes, category, cleared, date, amount = (
-                    row["Account"],
-                    row["Payee"],
-                    row["Notes"],
-                    row["Category"],
-                    row["Cleared"],
-                    row["Date"],
-                    row["Amount"],
-                )
+            for file_pattern in CSV_FILE_PATH.split(','):
+                files = glob.glob(file_pattern.strip())
+                for file_path_str in files:
+                    file_path = pathlib.Path(file_path_str)
 
-                account = get_or_create_account(actual.session, account_name)
-                try:
-                    t = reconcile_transaction(
-                        actual.session,
-                        date,
-                        account,
-                        payee,
-                        notes,
-                        category,
-                        amount,
-                        cleared=cleared,
-                        already_matched=added_transactions,
-                    )
-                    added_transactions.append(t)
-                    if t.changed():
-                        print(f"Added or modified {t}")
-                except ActualError as e:  # Corrected exception catch
-                    print(f"Error reconciling transaction: {row}. Error: {e}")
-                    continue
-
-            actual.commit()
-            print("Transactions imported successfully!")
+                    if file_path.is_file():
+                        process_csv_file(file_path, actual)
+                    else:
+                        logging.warning(f"{file_path_str} is not a valid file.")
 
     except Exception as e:
-        print(f"A general error occurred: {e}")
+        logging.exception(f"A general error occurred: {e}")
 
 
 if __name__ == "__main__":

@@ -15,13 +15,14 @@ RUN pip install --no-cache-dir -r requirements.txt  # Install from requirements.
 
 # Copy your script and any other necessary files
 COPY massActualCSVImport.py . 
+COPY start.sh . 
+RUN chmod 0744 /app/massActualCSVImport.py
+RUN chmod 0744 /app/start.sh
 # COPY transactions.csv . # If your csv is in the same directory.
 
-# Copy cron job configuration
-COPY crontab /etc/cron.d/budget_cron
-
-# Set permissions for cron
-RUN chmod 0644 /etc/cron.d/budget_cron
 
 # Start cron service
-CMD ["cron", "-f"] 
+#CMD cron && tail -f /var/log/cron.log
+ENTRYPOINT ["/bin/sh", "/app/start.sh"]
+
+

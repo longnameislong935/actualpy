@@ -1,2 +1,1 @@
-actualpy
-# other libraries if needed
+actualpy==0.10.0
