@@ -43,7 +43,7 @@ def load_csv_data(file: pathlib.Path) -> list[dict]:
                     "Payee": payee,
                     "Notes": notes,
                     "Category": category,
-                    "Cleared": False,
+                    "Cleared": True,
                     "Date": date,
                     "Amount": amount,
                 })
